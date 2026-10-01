@@ -1,0 +1,39 @@
+# Render blueprint: separate backend API + frontend static site.
+# Frontend uses a Static Site serving `next start`? We deploy frontend as a Web Service
+# running `npm start` (Next.js server) so NEXT_PUBLIC_API_URL works at build time.
+services:
+  - type: web
+    name: mov-converter-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 20
+      - key: FRONTEND_URL
+        value: https://mov-converter-frontend.onrender.com
+      - key: MAX_FILE_SIZE_MB
+        value: 100
+      - key: CLEANUP_AFTER_MINUTES
+        value: 30
+      - key: MAX_CONCURRENT_CONVERSIONS
+        value: 1
+
+  - type: web
+    name: mov-converter-frontend
+    runtime: node
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    plan: free
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: NEXT_PUBLIC_API_URL
+        value: https://mov-converter-api.onrender.com
