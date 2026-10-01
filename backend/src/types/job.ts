@@ -11,8 +11,8 @@ export interface ConversionJob {
   status: JobStatus;
   /** 0-100. Only set from real FFmpeg progress; otherwise stays at a coarse stage value. */
   progress: number;
-  /** Current human-readable stage: uploading | converting | finalizing */
-  stage: 'uploading' | 'converting' | 'finalizing' | 'done' | 'failed';
+  /** Current human-readable stage: queued | uploading | converting | finalizing */
+  stage: 'queued' | 'uploading' | 'converting' | 'finalizing' | 'done' | 'failed';
   inputPath: string;
   outputPath: string;
   originalName: string;

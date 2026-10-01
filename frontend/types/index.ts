@@ -15,8 +15,26 @@ export interface ConvertResponse {
 
 export interface StatusResponse {
   success: boolean;
-  status: 'processing' | 'completed' | 'failed';
+  status: 'queued' | 'processing' | 'completed' | 'failed';
   progress: number;
   downloadUrl?: string;
   message?: string;
+}
+
+export interface BatchJobStatus {
+  jobId: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed' | 'expired';
+  progress: number;
+  downloadUrl?: string;
+  message?: string;
+}
+
+export interface BatchStatusResponse {
+  success: boolean;
+  jobs: BatchJobStatus[];
+}
+
+export interface ServerLimits {
+  maxFileSizeMb: number;
+  maxFilesPerBatch: number;
 }

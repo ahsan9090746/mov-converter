@@ -1,6 +1,9 @@
 import type { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
+import path from 'node:path';
 import { env } from '../config/env.js';
+import { jobStore } from '../jobs/job.store.js';
+import { removeDirRecursive, storageRoot } from '../utils/files.js';
 
 export interface ApiError extends Error {
   statusCode?: number;
@@ -12,7 +15,15 @@ export function notFoundHandler(_req: Request, res: Response): void {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
+  // Upload-phase failure (multer error / rejected file): a job id was minted
+  // and multer may have left a partial input.mov, but no job record exists yet.
+  // Delete the partial job directory so failed uploads leave nothing behind.
+  const jobId = (req as Request & { jobId?: string }).jobId;
+  if (jobId && !jobStore.get(jobId)) {
+    removeDirRecursive(path.join(storageRoot, jobId)).catch(() => undefined);
+  }
+
   // Multer errors (file too large etc.) -> clean user messages
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {

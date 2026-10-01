@@ -3,39 +3,56 @@
 import { useRef, useState } from 'react';
 
 interface Props {
-  onFileChosen: (file: File) => void;
+  onFilesChosen: (files: File[]) => void;
   onError: (message: string) => void;
   disabled?: boolean;
+  /** Maximum files accepted per batch (server-driven). */
+  maxFiles: number;
+  /** Maximum bytes per file (server-driven). */
+  maxBytes: number;
 }
 
-const MAX_CLIENT_BYTES = 100 * 1024 * 1024;
+const ALLOWED_MIME = new Set(['video/quicktime', 'video/x-quicktime', 'video/mov', 'application/octet-stream']);
 
-export function UploadZone({ onFileChosen, onError, disabled }: Props) {
+function isValidMov(file: File): boolean {
+  const extOk = file.name.toLowerCase().endsWith('.mov');
+  const mimeOk = file.type === '' || ALLOWED_MIME.has(file.type.toLowerCase());
+  return extOk && mimeOk;
+}
+
+export function UploadZone({ onFilesChosen, onError, disabled, maxFiles, maxBytes }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const dragCount = useRef(0);
 
-  function validateAndEmit(file: File | undefined) {
-    if (!file) return;
-    const extOk = file.name.toLowerCase().endsWith('.mov');
-    const mimeOk =
-      file.type === '' ||
-      ['video/quicktime', 'video/x-quicktime', 'video/mov', 'application/octet-stream'].includes(
-        file.type.toLowerCase()
-      );
-    if (!extOk || !mimeOk) {
-      onError('Only MOV (.mov) files are supported. Please choose a .mov video.');
-      return;
+  const maxMb = Math.max(1, Math.round(maxBytes / (1024 * 1024)));
+
+  function validateAndEmit(list: FileList | File[] | undefined | null) {
+    if (!list) return;
+    const picked = Array.from(list);
+    if (picked.length === 0) return;
+    const valid: File[] = [];
+    for (const file of picked) {
+      if (!isValidMov(file)) {
+        onError(`"${file.name}" is not a MOV file. Only .mov videos are supported.`);
+        continue;
+      }
+      if (file.size === 0) {
+        onError(`"${file.name}" appears to be empty. Please choose a valid MOV file.`);
+        continue;
+      }
+      if (file.size > maxBytes) {
+        onError(`"${file.name}" is too large. Maximum allowed size is ${maxMb} MB per file.`);
+        continue;
+      }
+      valid.push(file);
     }
-    if (file.size === 0) {
-      onError('This file appears to be empty. Please choose a valid MOV file.');
-      return;
+    if (valid.length > maxFiles) {
+      onError(`Too many files — only the first ${maxFiles} were kept (max ${maxFiles} per batch).`);
+      onFilesChosen(valid.slice(0, maxFiles));
+    } else if (valid.length > 0) {
+      onFilesChosen(valid);
     }
-    if (file.size > MAX_CLIENT_BYTES) {
-      onError('File is too large. Maximum allowed size is 100 MB.');
-      return;
-    }
-    onFileChosen(file);
   }
 
   function openPicker() {
@@ -46,7 +63,7 @@ export function UploadZone({ onFileChosen, onError, disabled }: Props) {
     <div
       role="button"
       tabIndex={disabled ? -1 : 0}
-      aria-label="Upload a MOV file. Drag and drop a file here, or press Enter to browse."
+      aria-label="Upload MOV files. Drag and drop files here, or press Enter to browse."
       aria-disabled={disabled}
       onClick={openPicker}
       onKeyDown={(e) => {
@@ -77,7 +94,7 @@ export function UploadZone({ onFileChosen, onError, disabled }: Props) {
         e.preventDefault();
         dragCount.current = 0;
         setDragging(false);
-        validateAndEmit(e.dataTransfer.files?.[0]);
+        validateAndEmit(e.dataTransfer.files);
       }}
       className={`group rounded-2xl border-2 border-dashed p-8 text-center transition-all sm:p-10 ${
         dragging
@@ -98,31 +115,32 @@ export function UploadZone({ onFileChosen, onError, disabled }: Props) {
         </svg>
       </div>
       <p className="mt-4 text-[17px] font-semibold tracking-tight">
-        {dragging ? 'Drop your file to upload' : 'Drag & drop your MOV file here'}
+        {dragging ? 'Drop your files to upload' : 'Drag & drop your MOV files here'}
       </p>
-      <p className="mt-1 text-sm text-slate-500">or browse files from your device</p>
+      <p className="mt-1 text-sm text-slate-500">or browse files from your device (up to {maxFiles} at once)</p>
       <span
         aria-hidden="true"
         className={`mt-5 inline-block rounded-xl px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition ${
           disabled ? 'bg-slate-300' : 'bg-blue-600 group-hover:bg-blue-700'
         }`}
       >
-        Choose MOV File
+        Choose MOV Files
       </span>
       <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-[11px] font-semibold">
         <span className="rounded-md bg-slate-900 px-2 py-1 text-white">.MOV ONLY</span>
-        <span className="rounded-md bg-white px-2 py-1 text-slate-500 ring-1 ring-slate-200">Up to 100 MB</span>
+        <span className="rounded-md bg-white px-2 py-1 text-slate-500 ring-1 ring-slate-200">Up to {maxMb} MB each</span>
         <span className="rounded-md bg-white px-2 py-1 text-slate-500 ring-1 ring-slate-200">Output: MP4 · H.264</span>
       </div>
       <input
         ref={inputRef}
         type="file"
         accept=".mov,video/quicktime"
-        aria-label="Choose MOV file"
+        multiple
+        aria-label="Choose MOV files"
         className="sr-only"
         disabled={disabled}
         onChange={(e) => {
-          validateAndEmit(e.target.files?.[0]);
+          validateAndEmit(e.target.files);
           e.target.value = '';
         }}
       />

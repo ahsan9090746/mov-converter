@@ -1,6 +1,9 @@
+import type { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'node:path';
+import { v4 as uuidv4 } from 'uuid';
 import { env } from '../config/env.js';
+import { ensureJobDir, storageRoot } from '../utils/files.js';
 
 const MAX_BYTES = env.maxFileSizeMb * 1024 * 1024;
 
@@ -23,8 +26,37 @@ function isMovFile(originalName: string, mimetype: string): boolean {
   return false;
 }
 
+export interface ConvertRequest extends Request {
+  jobId: string;
+}
+
+/**
+ * Mint a job id BEFORE multer runs so diskStorage can stream the upload
+ * straight into storage/jobs/<jobId>/input.mov (no RAM buffering — the
+ * 512 MB free tier would be exhausted by memoryStorage on large files).
+ */
+export async function assignJobId(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  try {
+    const jobId = uuidv4();
+    (req as ConvertRequest).jobId = jobId;
+    await ensureJobDir(jobId);
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
+const diskStorage = multer.diskStorage({
+  destination: (req, _file, cb) => {
+    cb(null, path.join(storageRoot, (req as ConvertRequest).jobId));
+  },
+  filename: (_req, _file, cb) => {
+    cb(null, 'input.mov');
+  },
+});
+
 export const uploadSingleMov = multer({
-  storage: multer.memoryStorage(),
+  storage: diskStorage,
   limits: {
     fileSize: MAX_BYTES,
     files: 1,

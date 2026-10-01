@@ -11,7 +11,7 @@ Browser → Next.js → Express REST API → secure upload → temp storage → 
 - Real upload progress (XHR bytes) + real FFmpeg progress (stderr `time=` vs `Duration:`)
 - Statuses: `queued / uploading / processing / completed / failed / expired`
 - UUID job IDs, `POST /api/convert`, `GET /api/status/:jobId`, `GET /api/download/:jobId`, `GET /api/health`
-- Secure upload: 500 MB default (env-configurable), extension + MIME check, UUID filenames, path-traversal guards, non-public storage
+- Secure upload: 100 MB default (env-configurable), extension + MIME check, UUID filenames, path-traversal guards, non-public storage
 - Auto cleanup after download + periodic stale-job sweeper (`CLEANUP_AFTER_MINUTES`)
 - Helmet, configurable CORS (never `*` in prod), rate limiting, centralized JSON errors (no stack traces)
 - SEO metadata, responsive + accessible UI
@@ -63,11 +63,13 @@ Backend (`backend/.env.example`, never commit real `.env`):
 | `NODE_ENV` | `development` | `production` on Render |
 | `PORT` | `8000` | Render injects its own; code uses `process.env.PORT` with fallback |
 | `FRONTEND_URL` | `http://localhost:4000,http://127.0.0.1:4000` | Allowed CORS origin(s), comma-separated |
-| `MAX_FILE_SIZE_MB` | `500` | Upload cap |
+| `MAX_FILE_SIZE_MB` | `100` | Upload cap per file |
+| `MAX_FILES_PER_BATCH` | `10` | Max files per bulk batch (also caps batch-status + ZIP ids) |
 | `CLEANUP_AFTER_MINUTES` | `30` | Stale-job deletion window |
-| `FFMPEG_PATH` | _(unset)_ | Optional system binary override |
-| `MAX_CONCURRENT_CONVERSIONS` | `2` | CPU guard |
-| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `900000` / `100` | API rate limits |
+| `FFMPEG_PATH` | _(unset)_ | Optional system ffmpeg binary override (default: ffmpeg-static) |
+| `FFPROBE_PATH` | _(unset)_ | Optional system ffprobe binary override (default: ffprobe-static; missing → always transcode) |
+| `MAX_CONCURRENT_CONVERSIONS` | `2` (local) / `1` (Render free) | CPU guard; extra jobs wait with status `queued` (FIFO) |
+| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `900000` / `300` | API rate limits (sized for 10-file batches + 2 s polling) |
 
 Frontend (`frontend/.env.example`):
 
@@ -89,7 +91,7 @@ Option A — Blueprint (`render.yaml` at repo root):
 1. Push repo to GitHub.
 2. Render Dashboard → New → Blueprint → select repo. Render creates `mov-converter-api` + `mov-converter-frontend`.
 3. Confirm env vars (Render → service → Environment):
-   - API: `NODE_ENV=production`, `FRONTEND_URL=https://mov-converter-frontend.onrender.com`, `MAX_FILE_SIZE_MB=500`, `CLEANUP_AFTER_MINUTES=30`
+    - API: `NODE_ENV=production`, `FRONTEND_URL=https://mov-converter-frontend.onrender.com`, `MAX_FILE_SIZE_MB=100`, `CLEANUP_AFTER_MINUTES=30`, `MAX_CONCURRENT_CONVERSIONS=1`
    - Frontend: `NEXT_PUBLIC_API_URL=https://mov-converter-api.onrender.com`
 4. Health check: API service uses `/api/health` (already in `render.yaml`).
 
@@ -102,14 +104,16 @@ CORS: backend allows only `FRONTEND_URL`; update it to the real frontend URL in 
 
 ## API reference
 
-- `GET /api/health` → `{ success, status: 'healthy' }`
-- `POST /api/convert` (multipart `file`) → `202 { success, jobId, status: 'processing' }`
-- `GET /api/status/:jobId` → processing `{ success, status:'processing', progress }`, completed `{ success, status:'completed', progress:100, downloadUrl }`, failed → `422 { success:false, status:'failed', message }`
+- `GET /api/health` → `{ success, status: 'healthy', maxFileSizeMb, maxFilesPerBatch }` (limits drive all frontend validation/text)
+- `POST /api/convert` (multipart `file`) → `202 { success, jobId, status: 'processing' }`, or `status: 'queued'` when all conversion slots are busy (FIFO queue, no 429)
+- `GET /api/status/:jobId` → queued/processing `{ success, status, progress }`, completed `{ success, status:'completed', progress:100, downloadUrl }`, failed → `422 { success:false, status:'failed', message }`
+- `POST /api/status/batch` (`{ jobIds: string[] }`, max 10 UUIDs) → `{ success, jobs: [{ jobId, status, progress, downloadUrl?, message? }] }` (one request for a whole batch)
 - `GET /api/download/:jobId` → `video/mp4` attachment, deleted ~5 s after delivery
+- `GET /api/download-zip?ids=a,b,c` → `application/zip` stream of completed MP4s (max 10, sanitized names); does not delete jobs
 
 ## Security
 
-Helmet, CORS allowlist, rate limits, 1 MB JSON cap, Multer size/file-count caps, `.mov` + MIME validation, memory upload → UUID job dir under `storage/jobs/` (never public), `Content-Disposition` with sanitized name, `spawn` arg array (no shell), no stack traces/paths in responses, structured `[UPLOAD]/[CONVERSION_*]/[CLEANUP]` logs without secrets.
+Helmet, CORS allowlist (first middleware, preflight for all routes, `Content-Disposition` exposed), rate limits, 1 MB JSON cap, Multer size/file-count caps, disk-streamed upload → UUID job dir under `storage/jobs/` (never public, partial dirs removed on upload failure), `.mov` + MIME validation, `Content-Disposition` with sanitized name, `spawn` arg array (no shell), no stack traces/paths in responses, structured `[UPLOAD]/[CONVERSION_*]/[CLEANUP]/[CORS]/[QUEUE]/[REMUX]/[TRANSCODE]/[ZIP]` logs without secrets.
 
 ## Limitations (Render V1)
 
