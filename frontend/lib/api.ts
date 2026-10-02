@@ -4,7 +4,11 @@ import type { BatchStatusResponse, ConvertResponse, ServerLimits, StatusResponse
 // Never hardcode localhost URLs in components.
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? '').replace(/\/$/, '');
 
-export const FALLBACK_LIMITS: ServerLimits = { maxFileSizeMb: 100, maxFilesPerBatch: 10 };
+export const FALLBACK_LIMITS: ServerLimits = { maxFileSizeMb: 500, maxFilesPerBatch: 500 };
+
+// Backend accepts up to 500 ids per status/ZIP request (DoS guard).
+// Larger bulk lists are auto-chunked by the frontend so "unlimited" works.
+export const BATCH_CHUNK_SIZE = 100;
 
 /** Distinguishes "server said no" from "server unreachable" so the UI
  *  never blames the connection for a CORS/413-style rejection. */
@@ -134,12 +138,56 @@ export async function fetchStatusBatch(jobIds: string[]): Promise<BatchStatusRes
   throw new ApiError(friendlyError(body, 'Could not check conversion status.'), { status: res.status });
 }
 
+/**
+ * Chunked batch poll for UNLIMITED bulk lists. Splits ids into
+ * BATCH_CHUNK_SIZE pieces, fires them in parallel, merges results —
+ * so 50, 200 or 500 files all poll in ~1 round-trip.
+ */
+export async function fetchStatusBatchChunked(jobIds: string[]): Promise<BatchStatusResponse> {
+  if (jobIds.length <= BATCH_CHUNK_SIZE) return fetchStatusBatch(jobIds);
+  const chunks: string[][] = [];
+  for (let i = 0; i < jobIds.length; i += BATCH_CHUNK_SIZE) {
+    chunks.push(jobIds.slice(i, i + BATCH_CHUNK_SIZE));
+  }
+  const results = await Promise.all(chunks.map((c) => fetchStatusBatch(c)));
+  return { success: true, jobs: results.flatMap((r) => r.jobs) };
+}
+
 export function downloadUrl(jobId: string): string {
   return apiUrl(`/api/download/${encodeURIComponent(jobId)}`);
 }
 
 export function downloadZipUrl(jobIds: string[]): string {
   return apiUrl(`/api/download-zip?ids=${jobIds.map(encodeURIComponent).join(',')}`);
+}
+
+/**
+ * Download ZIP for any batch size. Small lists use a plain GET link
+ * (fast, openable in a new tab); large lists POST the ids as JSON to
+ * avoid URL-length limits, then trigger a blob download.
+ */
+export async function downloadZipBlob(jobIds: string[]): Promise<void> {
+  const res = await fetch(apiUrl('/api/download-zip'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: jobIds }),
+  });
+  if (!res.ok) {
+    const body = await parseJsonSafe(res);
+    throw new ApiError(friendlyError(body, 'Failed to build the ZIP archive.'), { status: res.status });
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'converted-videos.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
 }
 
 export async function checkHealth(): Promise<boolean> {

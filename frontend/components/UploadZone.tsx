@@ -47,10 +47,9 @@ export function UploadZone({ onFilesChosen, onError, disabled, maxFiles, maxByte
       }
       valid.push(file);
     }
-    if (valid.length > maxFiles) {
-      onError(`Too many files — only the first ${maxFiles} were kept (max ${maxFiles} per batch).`);
-      onFilesChosen(valid.slice(0, maxFiles));
-    } else if (valid.length > 0) {
+    // UNLIMITED: accept every valid file. maxFiles (>=500) is only a hint
+    // for the helper text — never silently drop user files.
+    if (valid.length > 0) {
       onFilesChosen(valid);
     }
   }
@@ -117,7 +116,11 @@ export function UploadZone({ onFilesChosen, onError, disabled, maxFiles, maxByte
       <p className="mt-4 text-[17px] font-semibold tracking-tight">
         {dragging ? 'Drop your files to upload' : 'Drag & drop your MOV files here'}
       </p>
-      <p className="mt-1 text-sm text-slate-500">or browse files from your device (up to {maxFiles} at once)</p>
+      <p className="mt-1 text-sm text-slate-500">
+        {maxFiles >= 500
+          ? 'or browse files from your device (unlimited bulk — add as many as you want)'
+          : `or browse files from your device (up to ${maxFiles} at once)`}
+      </p>
       <span
         aria-hidden="true"
         className={`mt-5 inline-block rounded-xl px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition ${

@@ -18,11 +18,21 @@ services:
       - key: FRONTEND_URL
         value: https://mov-converter-frontend.onrender.com
       - key: MAX_FILE_SIZE_MB
-        value: 100
+        value: 500
+      - key: MAX_FILES_PER_BATCH
+        value: 500
       - key: CLEANUP_AFTER_MINUTES
         value: 30
       - key: MAX_CONCURRENT_CONVERSIONS
         value: 1
+      - key: VIDEO_PRESET
+        value: veryfast
+      - key: VIDEO_CRF
+        value: 18
+      - key: AUDIO_BITRATE
+        value: 192k
+      - key: RATE_LIMIT_MAX
+        value: 2000
 
   - type: web
     name: mov-converter-frontend

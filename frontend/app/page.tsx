@@ -11,9 +11,10 @@ import {
   FALLBACK_LIMITS,
   checkHealth,
   downloadUrl,
+  downloadZipBlob,
   downloadZipUrl,
   fetchServerLimits,
-  fetchStatusBatch,
+  fetchStatusBatchChunked,
   uploadWithRetry,
 } from '../lib/api';
 import type { ServerLimits } from '../types';
@@ -31,7 +32,10 @@ interface BatchItem {
 }
 
 const MAX_POLL_ERRORS = 10;
-const UPLOAD_PARALLELISM = 2;
+// 6 parallel uploads = ~3x faster bulk uploads vs the old 2-slot version.
+// The server FIFO queue (MAX_CONCURRENT_CONVERSIONS) still protects CPU,
+// so conversions never overlap beyond what the box can handle.
+const UPLOAD_PARALLELISM = 6;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -58,6 +62,10 @@ export default function HomePage() {
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const pollErrors = useRef(0);
   const keySeq = useRef(0);
+  // Sync ref guard: state updates are async/batched, but auto-start needs a
+  // synchronous "pipeline running" flag so two triggers can never upload
+  // the same file twice.
+  const pipelineActiveRef = useRef(false);
 
   function stopPolling() {
     if (pollRef.current) {
@@ -113,18 +121,12 @@ export default function HomePage() {
 
   const addFiles = useCallback(
     (files: File[]) => {
+      // UNLIMITED bulk: accept every valid file in one go. Uploads run
+      // 4-at-a-time and conversions queue FIFO on the server, so 50/200+
+      // files work without overloading anything.
       setGlobalError('');
       setItems((prev) => {
-        const room = limits.maxFilesPerBatch - prev.length;
-        if (room <= 0) {
-          setGlobalError(`Batch is full — maximum ${limits.maxFilesPerBatch} files per batch. Remove one to add more.`);
-          return prev;
-        }
-        const accepted = files.slice(0, room);
-        if (files.length > room) {
-          setGlobalError(`Only ${room} more file(s) fit — maximum ${limits.maxFilesPerBatch} per batch.`);
-        }
-        const next: BatchItem[] = accepted.map((file) => {
+        const next: BatchItem[] = files.map((file) => {
           keySeq.current += 1;
           return {
             key: `file-${Date.now()}-${keySeq.current}`,
@@ -139,7 +141,7 @@ export default function HomePage() {
         return [...prev, ...next];
       });
     },
-    [limits.maxFilesPerBatch]
+    []
   );
 
   function removeItem(key: string) {
@@ -184,7 +186,8 @@ export default function HomePage() {
     const keys = itemsRef.current
       .filter((it) => it.stage === 'idle' || it.stage === 'failed')
       .map((it) => it.key);
-    if (keys.length === 0 || starting) return;
+    if (keys.length === 0 || pipelineActiveRef.current) return;
+    pipelineActiveRef.current = true;
     setStarting(true);
     setGlobalError('');
     // Reset retried items to a clean idle state first.
@@ -199,30 +202,37 @@ export default function HomePage() {
         setGlobalError('The conversion server is still unreachable. It may be waking up — please wait a minute and try again.');
         return;
       }
-      // Upload starts immediately once the server answers; up to 2 in parallel.
+      // Upload starts immediately once the server answers; up to 6 in parallel.
       await uploadKeys(keys);
     } finally {
+      pipelineActiveRef.current = false;
       setStarting(false);
     }
   }
 
   async function retryItem(key: string) {
-    if (starting) return;
+    // Just reset to idle — the auto-start pipeline picks it up immediately
+    // (or as soon as the server answers), no extra click needed.
     patchItem(key, { stage: 'idle', error: '', jobId: null, uploadPct: 0, convertPct: 0 });
-    setStarting(true);
-    try {
-      const healthy = await waitForHealthy(90000);
-      if (!healthy) {
-        patchItem(key, { stage: 'failed', error: 'The conversion server is still unreachable. Please try again in a minute.' });
-        return;
-      }
-      await uploadKeys([key]);
-    } finally {
-      setStarting(false);
-    }
   }
 
-  // Batch polling: one request for all active jobs, every 2s, while any job is live.
+  // AUTO-START pipeline: the moment files are selected (single or 200 at
+  // once — even mid-batch while others convert), uploads begin by
+  // themselves once the server is ready. No "Convert" click needed.
+  const idleKey = items
+    .filter((it) => it.stage === 'idle')
+    .map((it) => it.key)
+    .sort()
+    .join(',');
+  useEffect(() => {
+    if (!idleKey) return;
+    if (server !== 'ready') return; // server still waking — fires when it answers
+    if (pipelineActiveRef.current) return; // pipeline busy — fires again when it frees
+    void startConversion();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idleKey, server]);
+
+  // Batch polling: chunked single-round requests for ALL active jobs, every 2s.
   const activeKey = items
     .filter((it) => it.jobId && (it.stage === 'converting' || it.stage === 'queued'))
     .map((it) => it.jobId as string)
@@ -244,7 +254,7 @@ export default function HomePage() {
         return;
       }
       try {
-        const batch = await fetchStatusBatch(ids);
+        const batch = await fetchStatusBatchChunked(ids);
         pollErrors.current = 0;
         setItems((prev) =>
           prev.map((it) => {
@@ -283,8 +293,8 @@ export default function HomePage() {
 
   const FEATURES = [
     {
-      title: 'True quality conversion',
-      body: 'Server-side FFmpeg to H.264 video with AAC audio — not a renamed container.',
+      title: 'Lossless quality conversion',
+      body: 'Already-compatible videos are copied bit-for-bit (zero loss). Others encode once at H.264 CRF 18 + AAC 192k — visually identical to the original.',
     },
     {
       title: 'Plays everywhere',
@@ -303,19 +313,19 @@ export default function HomePage() {
       body: `Up to ${maxMb} MB per file, with server-side validation on type, size and content.`,
     },
     {
-      title: 'Bulk conversion',
-      body: `Convert up to ${limits.maxFilesPerBatch} MOV files in one batch, then download them one by one or all as a ZIP.`,
+      title: 'Unlimited bulk conversion',
+      body: 'Drop in as many MOV files as you want — conversion auto-starts instantly, 6 uploads at a time, the rest queue automatically, then download one by one or all as a ZIP.',
     },
   ];
 
   const FAQS = [
     {
       q: 'Which files can I convert?',
-      a: `MOV (.mov) files up to ${maxMb} MB each, up to ${limits.maxFilesPerBatch} files per batch, producing MP4 downloads. Additional formats are planned for later releases.`,
+      a: `MOV (.mov) files up to ${maxMb} MB each — convert as many as you want in one batch, producing MP4 downloads. Additional formats are planned for later releases.`,
     },
     {
       q: 'Will my video lose quality?',
-      a: 'Compatible files are remuxed without re-encoding (no quality change at all); others use a fast H.264 preset with AAC 128k audio — a widely used balance of speed, quality and file size.',
+      a: 'No visible loss. Compatible files are remuxed or stream-copied bit-for-bit; everything else encodes once at H.264 CRF 18 (visually lossless) with AAC 192k audio and full resolution preserved.',
     },
     {
       q: 'Are my files stored permanently?',
@@ -415,7 +425,7 @@ export default function HomePage() {
 
                 {items.length === 0 ? (
                   <UploadZone
-                    disabled={busy}
+                    disabled={server === 'down'}
                     onError={setGlobalError}
                     onFilesChosen={addFiles}
                     maxFiles={limits.maxFilesPerBatch}
@@ -437,13 +447,22 @@ export default function HomePage() {
                         >
                           Clear finished
                         </button>
-                        {doneItems.length > 0 && (
+                        {doneItems.length > 0 && doneItems.length <= 50 && (
                           <a
                             href={downloadZipUrl(doneItems.map((it) => it.jobId as string))}
                             className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-slate-700"
                           >
                             Download all as ZIP
                           </a>
+                        )}
+                        {doneItems.length > 50 && (
+                          <button
+                            type="button"
+                            onClick={() => void downloadZipBlob(doneItems.map((it) => it.jobId as string)).catch((e) => setGlobalError(e instanceof Error ? e.message : 'Failed to build the ZIP archive.'))}
+                            className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-slate-700"
+                          >
+                            Download all as ZIP ({doneItems.length})
+                          </button>
                         )}
                       </div>
                     </div>
@@ -502,8 +521,7 @@ export default function HomePage() {
                                   <button
                                     type="button"
                                     onClick={() => void retryItem(it.key)}
-                                    disabled={busy}
-                                    className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 transition hover:bg-blue-50 disabled:opacity-50"
+                                    className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 transition hover:bg-blue-50"
                                   >
                                     Retry
                                   </button>
@@ -543,9 +561,12 @@ export default function HomePage() {
                       })}
                     </ul>
 
-                    {items.length < limits.maxFilesPerBatch && !busy && (
+                    {/* Multi-select stays open ALL the time — add more files even
+                        mid-batch while others upload/convert; they join the
+                        pipeline automatically. */}
+                    {server !== 'down' && (
                       <UploadZone
-                        disabled={busy}
+                        disabled={false}
                         onError={setGlobalError}
                         onFilesChosen={addFiles}
                         maxFiles={limits.maxFilesPerBatch}
@@ -553,18 +574,17 @@ export default function HomePage() {
                       />
                     )}
 
-                    {pendingCount > 0 && (
+                    {/* Manual button is only a fallback while the server is not
+                        ready yet — when ready, the auto-start pipeline takes
+                        every idle file by itself, no click needed. */}
+                    {pendingCount > 0 && server !== 'ready' && (
                       <button
                         type="button"
                         onClick={() => void startConversion()}
-                        disabled={busy || server === 'down'}
-                        className="group flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-5 py-3.5 text-[15px] font-bold text-white shadow-md shadow-blue-200 transition hover:from-blue-700 hover:to-indigo-700 disabled:cursor-not-allowed disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none"
+                        disabled
+                        className="group flex w-full cursor-wait items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-slate-400 to-slate-400 px-5 py-3.5 text-[15px] font-bold text-white shadow-md"
                       >
-                        {starting ? 'Starting…' : `Convert all (${pendingCount})`}
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="transition-transform group-hover:translate-x-0.5">
-                          <path d="M5 12h14" />
-                          <path d="m13 6 6 6-6 6" />
-                        </svg>
+                        {server === 'down' ? 'Server unreachable — will auto-start when back' : `Waiting for server… (${pendingCount} queued, auto-starts)`}
                       </button>
                     )}
                     {server === 'waking' && pendingCount > 0 && (
@@ -586,8 +606,8 @@ export default function HomePage() {
                 <dl className="mt-4 space-y-2.5 border-t border-white/10 pt-4 text-sm">
                   {[
                     ['Input', `.MOV up to ${maxMb} MB`],
-                    ['Output', '.MP4 · H.264 + AAC'],
-                    ['Batch', `Up to ${limits.maxFilesPerBatch} files + ZIP`],
+                    ['Output', '.MP4 · H.264 CRF 18 + AAC 192k'],
+                    ['Batch', 'Unlimited files + ZIP'],
                     ['Cost', 'Free · no account'],
                   ].map(([k, v]) => (
                     <div key={k} className="flex justify-between gap-3">
@@ -643,8 +663,8 @@ export default function HomePage() {
           </h2>
           <ol className="mt-8 grid gap-4 md:grid-cols-3">
             {[
-              ['Upload your MOVs', 'Drag & drop or browse up to 10 files at once. Each file is validated and transferred securely.'],
-              ['We convert them', 'Our servers remux or re-encode them to MP4 with H.264 video and AAC audio.'],
+              ['Upload your MOVs', 'Drag & drop or browse as many files as you want — conversion starts automatically, no button needed.'],
+              ['We convert them', 'Compatible videos copy over instantly with zero loss; others encode once at top quality (H.264 CRF 18 + AAC 192k).'],
               ['Download MP4s', 'Grab files one by one or all as a ZIP. Everything is deleted afterwards.'],
             ].map(([t, d], i) => (
               <li key={t} className="relative rounded-2xl border border-slate-200 bg-white p-6 pt-7 shadow-sm">

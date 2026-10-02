@@ -22,8 +22,9 @@ const convertLimiter = rateLimit({
 
 conversionRouter.post('/convert', convertLimiter, assignJobId, uploadSingleMov, handleConvert);
 // Batch status polls ride on the global limiter only: with the default
-// 300 req / 15 min budget, a 10-file batch polling every 2s stays well clear.
+// 2000 req / 15 min budget, even a 500-file batch polling every 2s stays clear.
 conversionRouter.post('/status/batch', handleStatusBatch);
 conversionRouter.get('/status/:jobId', handleStatus);
 conversionRouter.get('/download-zip', handleDownloadZip);
+conversionRouter.post('/download-zip', handleDownloadZip);
 conversionRouter.get('/download/:jobId', handleDownload);

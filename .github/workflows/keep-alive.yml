@@ -1,0 +1,50 @@
+# Keep the free Render API awake.
+#
+# Render's free tier puts a web service to SLEEP after ~15 minutes with no
+# inbound traffic. The next visitor then stares at "Waking up the server…"
+# for up to a minute. This workflow pings /api/health every 10 minutes so
+# the API never goes to sleep and conversions start instantly.
+#
+# Setup: none required — it defaults to the API URL from render.yaml.
+# If your API lives at a different URL, set a repository variable:
+#   GitHub repo → Settings → Secrets and variables → Actions → Variables →
+#   New variable: name = RENDER_API_URL, value = https://<your-api>.onrender.com
+#
+# Notes:
+# - Free and automatic on PUBLIC repos (Actions minutes are unlimited).
+# - On PRIVATE repos this uses ~4,300 Actions-minutes/month (over the 2,000
+#   free) — use cron-job.org instead (see README).
+# - GitHub auto-disables scheduled workflows after 60 days with no repo
+#   activity; re-enable under Actions → Keep Render API awake, or just push
+#   any commit. The frontend's "waking up" banner stays as a fallback.
+# - Ping the API only: one always-on service ≈ 720 h/month fits inside
+#   Render's 750 free instance-hours; keeping the frontend awake too would
+#   exceed the quota.
+
+name: Keep Render API awake
+
+on:
+  schedule:
+    # Every 10 minutes (must stay under Render's ~15 min sleep timeout).
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+env:
+  API_URL: ${{ vars.RENDER_API_URL }}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /api/health
+        run: |
+          BASE="${API_URL:-https://mov-converter-api.onrender.com}"
+          URL="$BASE/api/health"
+          echo "Pinging $URL ..."
+          # First request may trigger a cold start (up to ~60 s), so allow a
+          # long window and two attempts before calling it a failure.
+          curl --fail --silent --show-error \
+            --max-time 150 --retry 2 --retry-all-errors --retry-delay 10 \
+            "$URL" --output /dev/null
+          echo "API is awake."

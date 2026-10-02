@@ -102,6 +102,18 @@ Option B — manual (two Web Services):
 
 CORS: backend allows only `FRONTEND_URL`; update it to the real frontend URL in production.
 
+## Keep the free API awake (no more "Waking up the server…")
+
+Render's free tier sleeps a web service after ~15 min without traffic — the next visitor waits up to a minute. Fix it with a free keep-alive ping to `GET https://<your-api>.onrender.com/api/health` every 10 minutes:
+
+**Option 1 — GitHub Actions (already wired, zero setup).** `.github/workflows/keep-alive.yml` pings the API every 10 min. Just push to GitHub → Actions tab → confirm "Keep Render API awake" is enabled. Free + unlimited on **public** repos. If your API URL differs from `render.yaml`, set repo variable `RENDER_API_URL` (Settings → Secrets and variables → Actions → Variables). Caveats: GitHub pauses scheduled workflows after 60 days with no repo activity (re-enable or push any commit); on **private** repos it exceeds the 2,000 free Actions-minutes/month — use Option 2 instead.
+
+**Option 2 — cron-job.org / UptimeRobot (any repo).** Create a free account → new cronjob/monitor → URL = `https://<your-api>.onrender.com/api/health` → every 10 minutes → save. No code or minutes involved.
+
+Ping the **API only**: one always-on service (~720 h/month) fits Render's 750 free instance-hours; keeping the frontend awake too would exceed the quota. The frontend lets the frontend sleep — its cold start is short. The app's "waking up" banner stays as a fallback for the rare cold start.
+
+Permanent fix (no pings needed): switch the API service to Render **Starter** (~$7/mo) — it never sleeps.
+
 ## API reference
 
 - `GET /api/health` → `{ success, status: 'healthy', maxFileSizeMb, maxFilesPerBatch }` (limits drive all frontend validation/text)

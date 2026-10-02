@@ -16,6 +16,12 @@ import type { ConversionJob, JobStatus } from '../types/job.js';
 let activeConversions = 0;
 const pendingQueue: string[] = [];
 
+// Hard per-request guards (DoS protection). The UI batch size
+// (env.maxFilesPerBatch, default 500) is the soft UX limit; these are the
+// absolute per-request ceilings — the frontend chunks bigger lists.
+const BATCH_HARD_MAX = 500;
+const ZIP_HARD_MAX = 500;
+
 export function isValidJobId(jobId: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId);
 }
@@ -157,8 +163,10 @@ export function handleStatusBatch(req: Request, res: Response, next: NextFunctio
     if (!Array.isArray(jobIds) || jobIds.length === 0) {
       throw httpError(400, 'Provide jobIds as a non-empty array of job ids.');
     }
-    if (jobIds.length > env.maxFilesPerBatch) {
-      throw httpError(400, `Too many job ids. Maximum ${env.maxFilesPerBatch} per batch.`);
+    // Hard per-request cap (DoS guard). The frontend auto-chunks larger
+    // bulk lists into multiple batch requests, so "unlimited" files still work.
+    if (jobIds.length > BATCH_HARD_MAX) {
+      throw httpError(400, `Too many job ids per request. Maximum ${BATCH_HARD_MAX} — the app splits bigger batches automatically.`);
     }
     const jobs: BatchJobEntry[] = jobIds.map((id) => {
       if (typeof id !== 'string' || !isValidJobId(id)) {
@@ -178,7 +186,9 @@ export function handleStatusBatch(req: Request, res: Response, next: NextFunctio
 }
 
 /**
- * Stream a ZIP of completed MP4s: GET /api/download-zip?ids=a,b,c.
+ * Stream a ZIP of completed MP4s.
+ *  - GET  /api/download-zip?ids=a,b,c   (small batches, shareable link)
+ *  - POST /api/download-zip { ids: [...] } (large/unlimited batches — avoids URL-length limits)
  * Validates every id (UUID, exists, completed, file present). Names come
  * from the sanitized per-job download names, so no path traversal is possible.
  * NOTE: a ZIP download intentionally does NOT delete the jobs (individual
@@ -187,17 +197,24 @@ export function handleStatusBatch(req: Request, res: Response, next: NextFunctio
  */
 export async function handleDownloadZip(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const raw = req.query.ids;
-    if (typeof raw !== 'string' || raw.trim().length === 0) {
-      throw httpError(400, 'Provide ids as a comma-separated list, e.g. ?ids=<id1>,<id2>.');
+    let ids: string[] = [];
+    if (req.method === 'POST') {
+      const body = (req.body ?? {}) as { ids?: unknown };
+      if (!Array.isArray(body.ids)) throw httpError(400, 'Provide ids as an array of job ids, e.g. { "ids": ["<id1>", "<id2>"] }.');
+      ids = body.ids.map((s) => String(s).trim()).filter(Boolean);
+    } else {
+      const raw = req.query.ids;
+      if (typeof raw !== 'string' || raw.trim().length === 0) {
+        throw httpError(400, 'Provide ids as a comma-separated list, e.g. ?ids=<id1>,<id2>.');
+      }
+      ids = raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
     }
-    const ids = raw
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
     if (ids.length === 0) throw httpError(400, 'Provide at least one job id.');
-    if (ids.length > env.maxFilesPerBatch) {
-      throw httpError(400, `Too many ids. Maximum ${env.maxFilesPerBatch} per ZIP.`);
+    if (ids.length > ZIP_HARD_MAX) {
+      throw httpError(400, `Too many ids per ZIP request. Maximum ${ZIP_HARD_MAX} — download the rest as a second ZIP.`);
     }
 
     const ready: ConversionJob[] = [];
